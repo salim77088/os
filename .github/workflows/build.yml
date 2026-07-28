@@ -59,11 +59,11 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-          cache-dependency-path: api/go.sum
       
       - name: Download dependencies
         working-directory: api
         run: |
+          go mod tidy
           go mod download
           go mod verify
       
