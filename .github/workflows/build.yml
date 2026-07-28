@@ -155,7 +155,7 @@ jobs:
             bash \
             coreutils \
             findutils \
-            strip
+            binutils
 
           # Configuration
           ARCH="x86_64"
