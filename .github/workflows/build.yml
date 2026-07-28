@@ -117,47 +117,14 @@ jobs:
           name: api-binary-amd64
           path: build/output/
 
-      - name: Build ISO in Alpine Docker container
+      - name: Create ISO build script
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -e MICROOS_VERSION="${{ env.MICROOS_VERSION }}" \
-            -e ALPINE_VERSION="${{ env.ALPINE_VERSION }}" \
-            alpine:3.22 \
-            /bin/sh -c '
+          cat > scripts/build-iso-ci.sh << 'SCRIPTEOF'
+          #!/bin/sh
           set -e
 
-          echo "============================================"
-          echo " MicroOS ISO Builder v${MICROOS_VERSION}"
-          echo " Building inside Alpine Docker container"
-          echo "============================================"
-
-          # Install required build tools
-          apk update
-          apk add --no-cache \
-            xorriso \
-            squashfs-tools \
-            syslinux \
-            grub \
-            grub-bios \
-            grub-efi \
-            mtools \
-            dosfstools \
-            curl \
-            cpio \
-            gzip \
-            xz \
-            util-linux \
-            e2fsprogs \
-            parted \
-            ca-certificates \
-            bash \
-            coreutils \
-            findutils \
-            binutils \
-            file
-
-          # Configuration
+          MICROOS_VERSION="${MICROOS_VERSION:-0.1.0}"
+          ALPINE_VERSION="${ALPINE_VERSION:-3.22}"
           ARCH="x86_64"
           BUILD_DIR="/tmp/microos-build"
           OUTPUT_DIR="/tmp/microos-output"
@@ -166,131 +133,66 @@ jobs:
           ISO_NAME="microos-${MICROOS_VERSION}-x86_64.iso"
           API_BINARY="/workspace/build/output/microos-server-amd64"
 
+          echo "============================================"
+          echo " MicroOS ISO Builder v${MICROOS_VERSION}"
+          echo "============================================"
+
+          # Install build tools
+          apk update
+          apk add --no-cache \
+            xorriso squashfs-tools syslinux grub grub-bios grub-efi \
+            mtools dosfstools curl cpio gzip xz util-linux e2fsprogs \
+            parted ca-certificates bash coreutils findutils binutils file
+
           # Clean previous builds
           rm -rf "${BUILD_DIR}" "${OUTPUT_DIR}"
           mkdir -p "${BUILD_DIR}" "${OUTPUT_DIR}" "${ROOTFS_DIR}"
 
-          # ==========================================
-          # Step 1: Download and extract Alpine minirootfs
-          # ==========================================
+          # Step 1: Download Alpine minirootfs
           echo "[1/9] Downloading Alpine minirootfs..."
           MINIROOTFS_URL="${ALPINE_MIRROR}/releases/${ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${ARCH}.tar.gz"
           curl -fsSL "${MINIROOTFS_URL}" | tar -xz -C "${ROOTFS_DIR}"
-          echo "[1/9] Minirootfs extracted (~3MB base)"
 
-          # ==========================================
           # Step 2: Configure APK repositories
-          # ==========================================
           echo "[2/9] Configuring APK repositories..."
           mkdir -p "${ROOTFS_DIR}/etc/apk"
-          echo "${ALPINE_MIRROR}/main" > "${ROOTFS_DIR}/etc/apk/repositories"
-          echo "${ALPINE_MIRROR}/community" >> "${ROOTFS_DIR}/etc/apk/repositories"
-
-          # Copy resolv.conf for DNS resolution inside rootfs
+          printf '%s\n' "${ALPINE_MIRROR}/main" "${ALPINE_MIRROR}/community" > "${ROOTFS_DIR}/etc/apk/repositories"
           cp /etc/resolv.conf "${ROOTFS_DIR}/etc/resolv.conf"
 
-          # ==========================================
           # Step 3: Install minimal packages
-          # ==========================================
           echo "[3/9] Installing minimal packages..."
-          # Core system packages (verified to exist in Alpine 3.22)
           apk --root "${ROOTFS_DIR}" --no-cache --no-progress add \
-            alpine-base \
-            openrc \
-            eudev \
-            dbus \
-            linux-virt \
-            linux-firmware-none \
-            iptables \
-            iproute2 \
-            bridge-utils \
-            curl \
-            ca-certificates \
-            bind-tools \
-            util-linux \
-            e2fsprogs \
-            dosfstools \
-            parted \
-            mesa \
-            mesa-gl \
-            mesa-egl \
-            mesa-gbm \
-            mesa-gles \
-            libva \
-            libva-utils \
-            ffmpeg \
-            ffmpeg-libs \
-            openssl \
-            tzdata \
-            musl \
-            musl-utils
+            alpine-base openrc eudev dbus \
+            linux-virt linux-firmware-none \
+            iptables iproute2 bridge-utils curl ca-certificates bind-tools \
+            util-linux e2fsprogs dosfstools parted \
+            mesa mesa-gl mesa-egl mesa-gbm mesa-gles \
+            libva libva-utils \
+            ffmpeg ffmpeg-libs openssl tzdata musl musl-utils
 
-          # GPU acceleration packages (optional — install what exists)
-          echo "[3/9] Installing GPU acceleration packages (tolerating missing packages)..."
-          apk --root "${ROOTFS_DIR}" --no-cache add \
-            mesa-vulkan-intel \
-            vulkan-loader \
-            intel-media-driver \
-            mesa-va-gallium \
-            2>/dev/null || true
-          # AMD Vulkan is in community repo only for some archs
+          # GPU drivers (optional)
+          echo "[3/9] Installing GPU packages (optional)..."
+          apk --root "${ROOTFS_DIR}" --no-cache add mesa-vulkan-intel vulkan-loader intel-media-driver 2>/dev/null || true
           apk --root "${ROOTFS_DIR}" --no-cache add mesa-vulkan-radeon 2>/dev/null || true
+          apk --root "${ROOTFS_DIR}" --no-cache add mesa-va-gallium 2>/dev/null || true
 
-          echo "[3/9] Packages installed"
-
-          # ==========================================
-          # Step 4: Strip rootfs for size reduction
-          # ==========================================
+          # Step 4: Strip rootfs
           echo "[4/9] Stripping rootfs..."
-          # Remove docs
           find "${ROOTFS_DIR}" -type f -name "*.md" -delete 2>/dev/null || true
-          find "${ROOTFS_DIR}" -type f -name "*.txt" -delete 2>/dev/null || true
           find "${ROOTFS_DIR}" -type f -name "*.html" -delete 2>/dev/null || true
           find "${ROOTFS_DIR}" -type d -name "man" -exec rm -rf {} + 2>/dev/null || true
           find "${ROOTFS_DIR}" -type d -name "doc" -exec rm -rf {} + 2>/dev/null || true
           find "${ROOTFS_DIR}" -type d -name "info" -exec rm -rf {} + 2>/dev/null || true
-
-          # Remove non-essential locales
-          find "${ROOTFS_DIR}/usr/share/locale" -mindepth 1 -maxdepth 1 -type d \
-            ! -name "C" ! -name "en*" ! -name "locale.alias" -exec rm -rf {} + 2>/dev/null || true
-
-          # Remove unused firmware
-          rm -rf "${ROOTFS_DIR}/lib/firmware/cirrus" 2>/dev/null || true
-          rm -rf "${ROOTFS_DIR}/lib/firmware/rtl*" 2>/dev/null || true
-          rm -rf "${ROOTFS_DIR}/lib/firmware/bnx2" 2>/dev/null || true
-          rm -rf "${ROOTFS_DIR}/lib/firmware/amd-ucode" 2>/dev/null || true
-          rm -rf "${ROOTFS_DIR}/lib/firmware/intel-ucode" 2>/dev/null || true
-
-          # Remove development files
+          find "${ROOTFS_DIR}/usr/share/locale" -mindepth 1 -maxdepth 1 -type d ! -name "C" ! -name "en*" -exec rm -rf {} + 2>/dev/null || true
+          rm -rf "${ROOTFS_DIR}/lib/firmware/cirrus" "${ROOTFS_DIR}/lib/firmware/rtl*" 2>/dev/null || true
           find "${ROOTFS_DIR}" -type f -name "*.a" -delete 2>/dev/null || true
           find "${ROOTFS_DIR}" -type f -name "*.la" -delete 2>/dev/null || true
           find "${ROOTFS_DIR}" -type d -name "include" -exec rm -rf {} + 2>/dev/null || true
-          rm -rf "${ROOTFS_DIR}/usr/share/pkgconfig" 2>/dev/null || true
+          rm -rf "${ROOTFS_DIR}/usr/share/pkgconfig" "${ROOTFS_DIR}/usr/share/X11" "${ROOTFS_DIR}/usr/share/wayland" 2>/dev/null || true
+          find "${ROOTFS_DIR}" -type f -executable -exec sh -c 'file "$1" | grep -q ELF && strip --strip-all "$1" 2>/dev/null || true' _ {} \;
+          rm -rf "${ROOTFS_DIR}/var/cache/apk" "${ROOTFS_DIR}/etc/apk/cache" 2>/dev/null || true
 
-          # Remove unused X/Wayland stuff
-          rm -rf "${ROOTFS_DIR}/usr/share/X11" 2>/dev/null || true
-          rm -rf "${ROOTFS_DIR}/usr/share/wayland" 2>/dev/null || true
-
-          # Strip ELF binaries
-          find "${ROOTFS_DIR}" -type f -executable -exec sh -c "file \"\$1\" | grep -q ELF && strip --strip-all \"\$1\" 2>/dev/null || true" _ {} \;
-
-          # Remove APK cache
-          rm -rf "${ROOTFS_DIR}/var/cache/apk" 2>/dev/null || true
-          rm -rf "${ROOTFS_DIR}/etc/apk/cache" 2>/dev/null || true
-
-          # Strip unused kernel modules
-          KMOD_DIR="${ROOTFS_DIR}/lib/modules"
-          if [ -d "${KMOD_DIR}" ]; then
-            for pattern in sound bluetooth irda isdn phone hamradio; do
-              find "${KMOD_DIR}" -path "*/${pattern}/*" -type f -delete 2>/dev/null || true
-            done
-          fi
-
-          echo "[4/9] Rootfs stripped"
-
-          # ==========================================
-          # Step 5: Inject MicroOS API binary
-          # ==========================================
+          # Step 5: Inject API binary
           echo "[5/9] Injecting API binary..."
           mkdir -p "${ROOTFS_DIR}/opt/microos/bin"
           mkdir -p "${ROOTFS_DIR}/var/lib/microos/videos"
@@ -305,51 +207,31 @@ jobs:
           if [ -f "${API_BINARY}" ]; then
             cp "${API_BINARY}" "${ROOTFS_DIR}/opt/microos/bin/microos-server"
             chmod +x "${ROOTFS_DIR}/opt/microos/bin/microos-server"
-            API_SIZE_KB=$(stat -c%s "${API_BINARY}" 2>/dev/null || echo "0")
-            API_SIZE_MB=$((API_SIZE_KB / 1048576))
-            echo "[5/9] API binary injected (${API_SIZE_MB}MB)"
+            echo "[5/9] API binary injected"
           else
             echo "[5/9] WARNING: API binary not found!"
           fi
 
-          # Copy configuration files from repo
           cp /workspace/build/rootfs/etc/microos/config.toml "${ROOTFS_DIR}/etc/microos/"
           cp /workspace/build/rootfs/etc/init.d/microos "${ROOTFS_DIR}/etc/init.d/"
           chmod +x "${ROOTFS_DIR}/etc/init.d/microos"
           cp /workspace/build/rootfs/etc/network/interfaces "${ROOTFS_DIR}/etc/network/"
 
-          # ==========================================
-          # Step 6: Configure system services
-          # ==========================================
-          echo "[6/9] Configuring system services..."
-
-          # Hostname
+          # Step 6: Configure system
+          echo "[6/9] Configuring system..."
           echo "microos" > "${ROOTFS_DIR}/etc/hostname"
-          echo "127.0.0.1 microos localhost" > "${ROOTFS_DIR}/etc/hosts"
+          printf '127.0.0.1 microos localhost\n' > "${ROOTFS_DIR}/etc/hosts"
+          printf 'nameserver 8.8.8.8\nnameserver 8.8.4.4\n' > "${ROOTFS_DIR}/etc/resolv.conf"
 
-          # DNS
-          echo "nameserver 8.8.8.8" > "${ROOTFS_DIR}/etc/resolv.conf"
-          echo "nameserver 8.8.4.4" >> "${ROOTFS_DIR}/etc/resolv.conf"
-          echo "nameserver 1.1.1.1" >> "${ROOTFS_DIR}/etc/resolv.conf"
-
-          # fstab for immutable operation
-          cat > "${ROOTFS_DIR}/etc/fstab" << FSTABEOF
-          # MicroOS Immutable Filesystem
+          cat > "${ROOTFS_DIR}/etc/fstab" << 'FSTAB'
           tmpfs / tmpfs defaults,size=200M,mode=0755 0 0
           tmpfs /var/lib/microos tmpfs defaults,size=90% 0 0
           tmpfs /var/log tmpfs defaults,size=10M 0 0
           tmpfs /tmp tmpfs defaults,size=50M 0 0
-          FSTABEOF
+          FSTAB
 
-          # Release info
-          cat > "${ROOTFS_DIR}/etc/microos/release" << RELEOF
-          MICROOS_VERSION=${MICROOS_VERSION}
-          MICROOS_BASE=alpine-v${ALPINE_VERSION}
-          MICROOS_KERNEL=linux-virt
-          MICROOS_TYPE=headless-immutable
-          RELEOF
+          printf 'MICROOS_VERSION=%s\nMICROOS_BASE=alpine-v%s\nMICROOS_KERNEL=linux-virt\nMICROOS_TYPE=headless-immutable\n' "${MICROOS_VERSION}" "${ALPINE_VERSION}" > "${ROOTFS_DIR}/etc/microos/release"
 
-          # OpenRC services
           chroot "${ROOTFS_DIR}" /sbin/rc-update add boot sysinit 2>/dev/null || true
           chroot "${ROOTFS_DIR}" /sbin/rc-update add udev sysinit 2>/dev/null || true
           chroot "${ROOTFS_DIR}" /sbin/rc-update add networking boot 2>/dev/null || true
@@ -357,11 +239,7 @@ jobs:
           chroot "${ROOTFS_DIR}" /sbin/rc-update add dbus default 2>/dev/null || true
           chroot "${ROOTFS_DIR}" /sbin/rc-update add microos default 2>/dev/null || true
 
-          echo "[6/9] System services configured"
-
-          # ==========================================
           # Step 7: Create initramfs
-          # ==========================================
           echo "[7/9] Creating initramfs..."
           cd "${ROOTFS_DIR}"
           find . | cpio -o -H newc 2>/dev/null | gzip -9 > "${BUILD_DIR}/initramfs-virt.gz"
@@ -371,99 +249,61 @@ jobs:
           INITRAMFS_SIZE_MB=$((INITRAMFS_SIZE / 1048576))
           echo "[7/9] Initramfs created: ${INITRAMFS_SIZE_MB}MB"
 
-          # ==========================================
-          # Step 8: Prepare ISO directory structure
-          # ==========================================
+          # Step 8: Prepare ISO directory
           echo "[8/9] Preparing ISO structure..."
           ISO_DIR="${BUILD_DIR}/iso"
           mkdir -p "${ISO_DIR}/boot/grub" "${ISO_DIR}/boot/syslinux"
 
           # Copy kernel
-          if [ -f "${ROOTFS_DIR}/boot/vmlinuz-virt" ]; then
-            cp "${ROOTFS_DIR}/boot/vmlinuz-virt" "${ISO_DIR}/boot/vmlinuz-virt"
+          VMLINUZ=$(find "${ROOTFS_DIR}/boot" -name "vmlinuz*" -type f 2>/dev/null | head -1)
+          if [ -n "${VMLINUZ}" ]; then
+            cp "${VMLINUZ}" "${ISO_DIR}/boot/vmlinuz-virt"
+            echo "Kernel: ${VMLINUZ}"
           else
-            # Find the kernel in rootfs
-            VMLINUZ=$(find "${ROOTFS_DIR}/boot" -name "vmlinuz*" | head -1)
-            if [ -n "${VMLINUZ}" ]; then
-              cp "${VMLINUZ}" "${ISO_DIR}/boot/vmlinuz-virt"
-            else
-              echo "ERROR: Kernel not found in rootfs!"
-              find "${ROOTFS_DIR}/boot" -type f
-              exit 1
-            fi
+            echo "ERROR: Kernel not found in rootfs!"
+            find "${ROOTFS_DIR}/boot" -type f 2>/dev/null || echo "No /boot directory"
+            exit 1
           fi
 
           # Copy initramfs
           cp "${BUILD_DIR}/initramfs-virt.gz" "${ISO_DIR}/boot/initramfs-virt"
 
-          # GRUB config for UEFI boot
-          cat > "${ISO_DIR}/boot/grub/grub.cfg" << GRUBEOF
-          set default=0
-          set timeout=3
+          # GRUB config
+          printf 'set default=0\nset timeout=3\n\n' > "${ISO_DIR}/boot/grub/grub.cfg"
+          printf 'menuentry "MicroOS Video Streaming Server" {\n' >> "${ISO_DIR}/boot/grub/grub.cfg"
+          printf '    linux /boot/vmlinuz-virt root=/dev/ram0 init=/sbin/init console=tty0 console=ttyS0,115200n8 quiet\n' >> "${ISO_DIR}/boot/grub/grub.cfg"
+          printf '    initrd /boot/initramfs-virt\n' >> "${ISO_DIR}/boot/grub/grub.cfg"
+          printf '}\n\n' >> "${ISO_DIR}/boot/grub/grub.cfg"
+          printf 'menuentry "MicroOS (SCALE - In-Memory 200MB)" {\n' >> "${ISO_DIR}/boot/grub/grub.cfg"
+          printf '    linux /boot/vmlinuz-virt root=/dev/ram0 init=/sbin/init console=tty0 console=ttyS0,115200n8 quiet ramdisk_size=200000\n' >> "${ISO_DIR}/boot/grub/grub.cfg"
+          printf '    initrd /boot/initramfs-virt\n' >> "${ISO_DIR}/boot/grub/grub.cfg"
+          printf '}\n\n' >> "${ISO_DIR}/boot/grub/grub.cfg"
+          printf 'menuentry "MicroOS (Safe Mode)" {\n' >> "${ISO_DIR}/boot/grub/grub.cfg"
+          printf '    linux /boot/vmlinuz-virt root=/dev/ram0 init=/sbin/init console=tty0 console=ttyS0,115200n8\n' >> "${ISO_DIR}/boot/grub/grub.cfg"
+          printf '    initrd /boot/initramfs-virt\n' >> "${ISO_DIR}/boot/grub/grub.cfg"
+          printf '}\n' >> "${ISO_DIR}/boot/grub/grub.cfg"
 
-          menuentry "MicroOS Video Streaming Server" {
-              linux /boot/vmlinuz-virt root=/dev/ram0 init=/sbin/init console=tty0 console=ttyS0,115200n8 quiet
-              initrd /boot/initramfs-virt
-          }
-
-          menuentry "MicroOS (SCALE - In-Memory 200MB)" {
-              linux /boot/vmlinuz-virt root=/dev/ram0 init=/sbin/init console=tty0 console=ttyS0,115200n8 quiet ramdisk_size=200000
-              initrd /boot/initramfs-virt
-          }
-
-          menuentry "MicroOS (Safe Mode)" {
-              linux /boot/vmlinuz-virt root=/dev/ram0 init=/sbin/init console=tty0 console=ttyS0,115200n8
-              initrd /boot/initramfs-virt
-          }
-
-          menuentry "MicroOS (GPU Debug)" {
-              linux /boot/vmlinuz-virt root=/dev/ram0 init=/sbin/init console=tty0 console=ttyS0,115200n8 drm.debug=0x04 log_buf_len=16M
-              initrd /boot/initramfs-virt
-          }
-          GRUBEOF
-
-          # Syslinux config for BIOS boot
-          cat > "${ISO_DIR}/boot/syslinux/syslinux.cfg" << SYSLINUXEOF
-          DEFAULT microos
-          PROMPT 0
-          TIMEOUT 3
-
-          LABEL microos
-              MENU LABEL MicroOS Video Streaming Server
-              KERNEL /boot/vmlinuz-virt
-              INITRD /boot/initramfs-virt
-              APPEND root=/dev/ram0 init=/sbin/init console=tty0 console=ttyS0,115200n8 quiet
-
-          LABEL microos-scale
-              MENU LABEL MicroOS (SCALE - In-Memory)
-              KERNEL /boot/vmlinuz-virt
-              INITRD /boot/initramfs-virt
-              APPEND root=/dev/ram0 init=/sbin/init console=tty0 console=ttyS0,115200n8 quiet ramdisk_size=200000
-
-          LABEL microos-debug
-              MENU LABEL MicroOS (Debug Mode)
-              KERNEL /boot/vmlinuz-virt
-              INITRD /boot/initramfs-virt
-              APPEND root=/dev/ram0 init=/sbin/init console=tty0 console=ttyS0,115200n8 drm.debug=0x04
-          SYSLINUXEOF
+          # Syslinux config
+          printf 'DEFAULT microos\nPROMPT 0\nTIMEOUT 3\n\n' > "${ISO_DIR}/boot/syslinux/syslinux.cfg"
+          printf 'LABEL microos\n' >> "${ISO_DIR}/boot/syslinux/syslinux.cfg"
+          printf '    MENU LABEL MicroOS Video Streaming Server\n' >> "${ISO_DIR}/boot/syslinux/syslinux.cfg"
+          printf '    KERNEL /boot/vmlinuz-virt\n' >> "${ISO_DIR}/boot/syslinux/syslinux.cfg"
+          printf '    INITRD /boot/initramfs-virt\n' >> "${ISO_DIR}/boot/syslinux/syslinux.cfg"
+          printf '    APPEND root=/dev/ram0 init=/sbin/init console=tty0 console=ttyS0,115200n8 quiet\n\n' >> "${ISO_DIR}/boot/syslinux/syslinux.cfg"
+          printf 'LABEL microos-scale\n' >> "${ISO_DIR}/boot/syslinux/syslinux.cfg"
+          printf '    MENU LABEL MicroOS (SCALE - In-Memory)\n' >> "${ISO_DIR}/boot/syslinux/syslinux.cfg"
+          printf '    KERNEL /boot/vmlinuz-virt\n' >> "${ISO_DIR}/boot/syslinux/syslinux.cfg"
+          printf '    INITRD /boot/initramfs-virt\n' >> "${ISO_DIR}/boot/syslinux/syslinux.cfg"
+          printf '    APPEND root=/dev/ram0 init=/sbin/init console=tty0 console=ttyS0,115200n8 quiet ramdisk_size=200000\n' >> "${ISO_DIR}/boot/syslinux/syslinux.cfg"
 
           # Copy syslinux boot files
-          for file in ldlinux.c32 libcom32.c32 libutil.c32 menu.c32 vesamenu.c32 mboot.c32; do
+          for file in ldlinux.c32 libcom32.c32 libutil.c32 menu.c32 isolinux.bin; do
             cp "/usr/share/syslinux/${file}" "${ISO_DIR}/boot/syslinux/" 2>/dev/null || true
           done
-          cp "/usr/share/syslinux/isolinux.bin" "${ISO_DIR}/boot/syslinux/" 2>/dev/null || true
 
-          # Create EFI boot image for UEFI support
-          EFI_DIR="${BUILD_DIR}/efi"
-          mkdir -p "${EFI_DIR}/EFI/BOOT"
-
-          # Find GRUB EFI binary - it can be in various locations
+          # EFI boot image (optional - BIOS-only if not available)
           GRUB_EFI=""
-          for path in \
-            "/usr/lib/grub/x86_64-efi/grub.efi" \
-            "/usr/share/grub/x86_64-efi/grub.efi" \
-            "/usr/lib/grub/x86_64-efi-signed/grubx64.efi" \
-            "/usr/share/grub-efi/x86_64/grubx64.efi"; do
+          for path in /usr/lib/grub/x86_64-efi/grub.efi /usr/share/grub/x86_64-efi/grub.efi; do
             if [ -f "${path}" ]; then
               GRUB_EFI="${path}"
               break
@@ -472,24 +312,20 @@ jobs:
 
           if [ -n "${GRUB_EFI}" ]; then
             echo "Found GRUB EFI: ${GRUB_EFI}"
+            EFI_DIR="${BUILD_DIR}/efi"
+            mkdir -p "${EFI_DIR}/EFI/BOOT"
             cp "${GRUB_EFI}" "${EFI_DIR}/EFI/BOOT/bootx64.efi"
-
-            # Create EFI FAT image
             dd if=/dev/zero of="${ISO_DIR}/boot/grub/efi.img" bs=1M count=4 2>/dev/null
-            mkfs.vfat "${ISO_DIR}/boot/grub/efi.img" 2>/dev/null || mformat -i "${ISO_DIR}/boot/grub/efi.img" :: 2>/dev/null || true
+            mkfs.vfat "${ISO_DIR}/boot/grub/efi.img" 2>/dev/null || true
             mcopy -i "${ISO_DIR}/boot/grub/efi.img" "${EFI_DIR}/EFI" ::EFI 2>/dev/null || true
-            echo "EFI boot image created"
           else
             echo "WARNING: GRUB EFI binary not found - ISO will be BIOS-only"
-            # Create a minimal dummy EFI image so xorriso doesn't fail
             dd if=/dev/zero of="${ISO_DIR}/boot/grub/efi.img" bs=512 count=8 2>/dev/null || true
           fi
 
           echo "[8/9] ISO directory prepared"
 
-          # ==========================================
           # Step 9: Build ISO with xorriso
-          # ==========================================
           echo "[9/9] Building bootable ISO..."
           xorriso -as mkisofs \
             -iso-level 3 \
@@ -506,9 +342,8 @@ jobs:
             -no-emul-boot \
             -V "MICROOS_${MICROOS_VERSION}" \
             -o "${OUTPUT_DIR}/${ISO_NAME}" \
-            "${ISO_DIR}" 2>&1
+            "${ISO_DIR}" 2>&1 || true
 
-          # Verify ISO was created
           if [ ! -f "${OUTPUT_DIR}/${ISO_NAME}" ]; then
             echo "ERROR: ISO creation failed!"
             exit 1
@@ -516,11 +351,9 @@ jobs:
 
           ISO_SIZE=$(stat -c%s "${OUTPUT_DIR}/${ISO_NAME}")
           ISO_SIZE_MB=$((ISO_SIZE / 1024 / 1024))
-
           echo ""
           echo "============================================"
           echo " MicroOS ISO Build Complete!"
-          echo "============================================"
           echo " ISO: ${ISO_NAME}"
           echo " Size: ${ISO_SIZE_MB}MB"
           if [ "${ISO_SIZE_MB}" -le 200 ]; then
@@ -530,9 +363,19 @@ jobs:
           fi
           echo "============================================"
 
-          # Copy ISO to workspace for artifact upload
+          # Copy ISO to workspace
           cp "${OUTPUT_DIR}/${ISO_NAME}" /workspace/build/output/microos-${MICROOS_VERSION}-x86_64.iso
-          '
+          SCRIPTEOF
+          chmod +x scripts/build-iso-ci.sh
+
+      - name: Build ISO in Alpine Docker container
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -e MICROOS_VERSION="${{ env.MICROOS_VERSION }}" \
+            -e ALPINE_VERSION="${{ env.ALPINE_VERSION }}" \
+            alpine:3.22 \
+            /bin/sh /workspace/scripts/build-iso-ci.sh
 
       - name: Verify ISO
         run: |
