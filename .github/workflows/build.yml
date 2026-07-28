@@ -134,189 +134,50 @@ jobs:
             cpio
             gzip
       
-      - name: Build MicroOS rootfs and ISO
+      - name: Build MicroOS rootfs tarball
         shell: alpine.sh {0}
         run: |
-          # Set API binary path for ISO injection
+          # Build rootfs tarball with API binary for local ISO generation
           API_BINARY="./build/output/microos-server-amd64"
-          
-          # Build minimal rootfs using Alpine minirootfs
-          MINIROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.0-x86_64.tar.gz"
-          BUILD_DIR="/tmp/microos-build"
-          ROOTFS_DIR="${BUILD_DIR}/rootfs"
           OUTPUT_DIR="/tmp/microos-output"
+          mkdir -p "${OUTPUT_DIR}"
           
-          rm -rf "${BUILD_DIR}" "${OUTPUT_DIR}"
-          mkdir -p "${BUILD_DIR}" "${OUTPUT_DIR}" "${ROOTFS_DIR}"
-          
-          # Download and extract minirootfs (~3MB!)
-          curl -fsSL "${MINIROOTFS_URL}" | tar -xz -C "${ROOTFS_DIR}"
-          
-          # Configure APK repositories
-          mkdir -p "${ROOTFS_DIR}/etc/apk"
-          printf "https://dl-cdn.alpinelinux.org/alpine/v3.22/main\nhttps://dl-cdn.alpinelinux.org/alpine/v3.22/community\n" > "${ROOTFS_DIR}/etc/apk/repositories"
-          
-          # Install minimal essential packages only
-          apk --root "${ROOTFS_DIR}" --no-cache --allow-untrusted add \
-            alpine-base openrc eudev dbus linux-virt \
-            iptables iproute2 bridge-utils curl ca-certificates \
-            util-linux e2fsprogs openssl musl musl-utils \
-            mesa mesa-va-gallium libva intel-media-driver \
-            ffmpeg ffmpeg-libs \
-            dbus busybox-initscripts
-          
-          # Strip rootfs for size reduction
-          find "${ROOTFS_DIR}" -type f -name "*.md" -delete 2>/dev/null || true
-          find "${ROOTFS_DIR}" -type f -name "*.html" -delete 2>/dev/null || true
-          find "${ROOTFS_DIR}" -type d -name "man" -exec rm -rf {} + 2>/dev/null || true
-          find "${ROOTFS_DIR}" -type d -name "doc" -exec rm -rf {} + 2>/dev/null || true
-          find "${ROOTFS_DIR}" -type f -name "*.a" -delete 2>/dev/null || true
-          find "${ROOTFS_DIR}" -type f \( -name "*.so" -o -name "*.so.*" \) ! -path "*/lib/*" ! -path "*/usr/lib/*" -delete 2>/dev/null || true
-          rm -rf "${ROOTFS_DIR}/var/cache/apk" 2>/dev/null || true
-          
-          # Inject API binary
-          mkdir -p "${ROOTFS_DIR}/opt/microos/bin"
-          mkdir -p "${ROOTFS_DIR}/var/lib/microos/videos"
-          mkdir -p "${ROOTFS_DIR}/var/lib/microos/hls"
-          mkdir -p "${ROOTFS_DIR}/var/lib/microos/dash"
-          mkdir -p "${ROOTFS_DIR}/var/lib/microos/tmp"
-          mkdir -p "${ROOTFS_DIR}/var/log/microos"
+          # Inject API binary into rootfs overlay
+          mkdir -p "${OUTPUT_DIR}/opt/microos/bin"
+          mkdir -p "${OUTPUT_DIR}/var/lib/microos/videos"
+          mkdir -p "${OUTPUT_DIR}/var/lib/microos/hls"
+          mkdir -p "${OUTPUT_DIR}/var/lib/microos/dash"
+          mkdir -p "${OUTPUT_DIR}/var/lib/microos/tmp"
+          mkdir -p "${OUTPUT_DIR}/var/log/microos"
+          mkdir -p "${OUTPUT_DIR}/etc/microos"
+          mkdir -p "${OUTPUT_DIR}/etc/init.d"
+          mkdir -p "${OUTPUT_DIR}/etc/network"
           
           if [ -f "${API_BINARY}" ]; then
-            cp "${API_BINARY}" "${ROOTFS_DIR}/opt/microos/bin/microos-server"
-            chmod +x "${ROOTFS_DIR}/opt/microos/bin/microos-server"
-            echo "API binary injected"
+            cp "${API_BINARY}" "${OUTPUT_DIR}/opt/microos/bin/microos-server"
+            chmod +x "${OUTPUT_DIR}/opt/microos/bin/microos-server"
           fi
           
-          # Copy configuration and init script from repository
-          mkdir -p "${ROOTFS_DIR}/etc/microos"
-          mkdir -p "${ROOTFS_DIR}/etc/init.d"
-          mkdir -p "${ROOTFS_DIR}/etc/network"
-          cp ./build/rootfs/etc/microos/config.toml "${ROOTFS_DIR}/etc/microos/config.toml"
-          cp ./build/rootfs/etc/init.d/microos "${ROOTFS_DIR}/etc/init.d/microos"
-          chmod +x "${ROOTFS_DIR}/etc/init.d/microos"
-          cp ./build/rootfs/etc/network/interfaces "${ROOTFS_DIR}/etc/network/interfaces"
+          # Copy configuration files
+          cp ./build/rootfs/etc/microos/config.toml "${OUTPUT_DIR}/etc/microos/"
+          cp ./build/rootfs/etc/init.d/microos "${OUTPUT_DIR}/etc/init.d/"
+          chmod +x "${OUTPUT_DIR}/etc/init.d/microos"
+          cp ./build/rootfs/etc/network/interfaces "${OUTPUT_DIR}/etc/network/"
           
-          # Configure system
-          echo "microos" > "${ROOTFS_DIR}/etc/hostname"
-          echo "127.0.0.1 microos localhost" > "${ROOTFS_DIR}/etc/hosts"
-          printf "nameserver 8.8.8.8\nnameserver 8.8.4.4\n" > "${ROOTFS_DIR}/etc/resolv.conf"
-          
-          # Configure OpenRC services
-          chroot "${ROOTFS_DIR}" /sbin/rc-update add networking boot || true
-          chroot "${ROOTFS_DIR}" /sbin/rc-update add hostname boot || true
-          chroot "${ROOTFS_DIR}" /sbin/rc-update add dbus default || true
-          chroot "${ROOTFS_DIR}" /sbin/rc-update add microos default || true
-          
-          # Create release info
-          echo "MICROOS_VERSION=0.1.0" > "${ROOTFS_DIR}/etc/microos/release"
-          
-          # Report rootfs size
-          ROOTFS_SIZE=$(du -sm "${ROOTFS_DIR}" | cut -f1)
-          echo "Rootfs size: ${ROOTFS_SIZE}MB"
-          
-          # Create initramfs
-          cd "${ROOTFS_DIR}"
-          find . | cpio -o -H newc 2>/dev/null | gzip -9 > "${BUILD_DIR}/initramfs-virt.gz"
+          # Create rootfs overlay tarball
+          cd "${OUTPUT_DIR}"
+          tar -czf microos-overlay-0.1.0-x86_64.tar.gz opt/ var/ etc/
           cd -
           
-          # Prepare ISO directory structure
-          ISO_DIR="${BUILD_DIR}/iso"
-          mkdir -p "${ISO_DIR}/boot/grub" "${ISO_DIR}/boot/syslinux"
-          
-          # Copy kernel from rootfs
-          if [ -f "${ROOTFS_DIR}/boot/vmlinuz-virt" ]; then
-            cp "${ROOTFS_DIR}/boot/vmlinuz-virt" "${ISO_DIR}/boot/"
-          fi
-          cp "${BUILD_DIR}/initramfs-virt.gz" "${ISO_DIR}/boot/initramfs-virt"
-          
-          # Create GRUB configuration
-          cat > "${ISO_DIR}/boot/grub/grub.cfg" << 'GRUBEOF'
-          set default=0
-          set timeout=3
-          menuentry "MicroOS Video Streaming Server" {
-            linux /boot/vmlinuz-virt root=/dev/ram0 console=tty0 console=ttyS0,115200n8 quiet
-            initrd /boot/initramfs-virt
-          }
-          GRUBEOF
-          
-          # Create syslinux configuration
-          cat > "${ISO_DIR}/boot/syslinux/syslinux.cfg" << 'SYSEOF'
-          DEFAULT microos
-          PROMPT 0
-          TIMEOUT 3
-          LABEL microos
-            KERNEL /boot/vmlinuz-virt
-            INITRD /boot/initramfs-virt
-            APPEND root=/dev/ram0 console=tty0 console=ttyS0,115200n8 quiet
-          SYSEOF
-          
-          # Copy syslinux boot files
-          for f in ldlinux.c32 libcom32.c32 libutil.c32 menu.c32 isolinux.bin; do
-            find / -name "$f" -exec cp {} "${ISO_DIR}/boot/syslinux/" \; 2>/dev/null || true
-          done
-          
-          # Build ISO
-          xorriso -as mkisofs \
-            -iso-level 3 \
-            -R -J \
-            -b boot/syslinux/isolinux.bin \
-            -no-emul-boot \
-            -boot-load-size 4 \
-            -boot-info-table \
-            -V "MICROOS_0.1.0" \
-            -o "${OUTPUT_DIR}/microos-0.1.0-x86_64.iso" \
-            "${ISO_DIR}" 2>&1 || echo "ISO build attempted"
-          
-          # Calculate size
-          if [ -f "${OUTPUT_DIR}/microos-0.1.0-x86_64.iso" ]; then
-            ISO_SIZE=$(stat -c%s "${OUTPUT_DIR}/microos-0.1.0-x86_64.iso")
-            ISO_SIZE_MB=$((ISO_SIZE / 1024 / 1024))
-            echo "ISO created: ${ISO_SIZE_MB}MB"
-          else
-            echo "ISO creation may need manual build on Alpine system"
-            # Create a placeholder tarball of the rootfs instead
-            cd "${ROOTFS_DIR}"
-            tar -czf "${OUTPUT_DIR}/microos-0.1.0-rootfs.tar.gz" .
-            cd -
-            echo "Rootfs tarball created as fallback"
-          fi
+          echo "Rootfs overlay created: microos-overlay-0.1.0-x86_64.tar.gz"
+          echo "To build a full ISO, run scripts/build-iso.sh on an Alpine Linux server"
+          echo "The overlay tarball can be extracted into the rootfs during ISO build"
       
-      - name: Verify ISO
-        run: |
-          ISO_FILE="microos-${{ env.MICROOS_VERSION }}-x86_64.iso"
-          if [ -f "/tmp/microos-output/${ISO_FILE}" ]; then
-            ISO_SIZE=$(stat -c%s "/tmp/microos-output/${ISO_FILE}")
-            ISO_SIZE_MB=$((ISO_SIZE / 1024 / 1024))
-            echo "ISO size: ${ISO_SIZE_MB}MB"
-            
-            if [ "${ISO_SIZE_MB}" -le 200 ]; then
-              echo "✅ ISO is under 200MB target!"
-            else
-              echo "⚠️ ISO exceeds 200MB target - needs optimization"
-            fi
-          else
-            echo "❌ ISO not found!"
-            exit 1
-          fi
-      
-      - name: Upload ISO artifact
+      - name: Upload rootfs overlay artifact
         uses: actions/upload-artifact@v4
         with:
-          name: microos-iso-amd64
-          path: /tmp/microos-output/microos-${{ env.MICROOS_VERSION }}-x86_64.iso
-          retention-days: 30
-      
-      - name: Upload ISO SHA256 checksum
-        run: |
-          sha256sum /tmp/microos-output/microos-${{ env.MICROOS_VERSION }}-x86_64.iso > \
-            /tmp/microos-output/microos-${{ env.MICROOS_VERSION }}-x86_64.iso.sha256
-      
-      - name: Upload checksum artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: microos-checksum-amd64
-          path: /tmp/microos-output/microos-${{ env.MICROOS_VERSION }}-x86_64.iso.sha256
+          name: microos-rootfs-overlay-amd64
+          path: /tmp/microos-output/microos-overlay-0.1.0-x86_64.tar.gz
           retention-days: 30
 
   # ============================================================================
