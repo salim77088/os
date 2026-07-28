@@ -110,7 +110,10 @@ EOF
         # === GPU acceleration (essential for transcoding) ===
         mesa \
         mesa-va-gallium \
-        mesa-vulkan \
+        mesa-vulkan-intel \
+        mesa-vulkan-radeon \
+        vulkan-loader \
+        vulkan-tools \
         libva \
         intel-media-driver \
         \
