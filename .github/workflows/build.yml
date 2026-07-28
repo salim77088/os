@@ -149,13 +149,14 @@ jobs:
             xz \
             util-linux \
             e2fsprogs \
-            dosfstools \
             parted \
             ca-certificates \
             bash \
             coreutils \
             findutils \
-            binutils
+            binutils \
+            file \
+            grub-efi-x86_64
 
           # Configuration
           ARCH="x86_64"
@@ -305,7 +306,9 @@ jobs:
           if [ -f "${API_BINARY}" ]; then
             cp "${API_BINARY}" "${ROOTFS_DIR}/opt/microos/bin/microos-server"
             chmod +x "${ROOTFS_DIR}/opt/microos/bin/microos-server"
-            echo "[5/9] API binary injected ($(stat -c%s "${API_BINARY}" | awk '{printf "%.1fMB", $1/1048576}'))"
+            API_SIZE_KB=$(stat -c%s "${API_BINARY}" 2>/dev/null || echo "0")
+            API_SIZE_MB=$((API_SIZE_KB / 1048576))
+            echo "[5/9] API binary injected (${API_SIZE_MB}MB)"
           else
             echo "[5/9] WARNING: API binary not found!"
           fi
@@ -365,8 +368,9 @@ jobs:
           find . | cpio -o -H newc 2>/dev/null | gzip -9 > "${BUILD_DIR}/initramfs-virt.gz"
           cd /tmp
 
-          INITRAMFS_SIZE=$(stat -c%s "${BUILD_DIR}/initramfs-virt.gz" | awk '{printf "%.1fMB", $1/1048576}')
-          echo "[7/9] Initramfs created: ${INITRAMFS_SIZE}"
+          INITRAMFS_SIZE=$(stat -c%s "${BUILD_DIR}/initramfs-virt.gz" 2>/dev/null || echo "0")
+          INITRAMFS_SIZE_MB=$((INITRAMFS_SIZE / 1048576))
+          echo "[7/9] Initramfs created: ${INITRAMFS_SIZE_MB}MB"
 
           # ==========================================
           # Step 8: Prepare ISO directory structure
