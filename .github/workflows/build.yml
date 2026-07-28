@@ -1,0 +1,346 @@
+# ============================================================================
+# MicroOS CI/CD Pipeline - GitHub Actions
+# Automatically builds the Go API, creates Alpine rootfs, and generates ISO
+# ============================================================================
+#
+# Security Note: This workflow uses GitHub Secrets for sensitive tokens.
+# NEVER hardcode tokens in workflow files. Use secrets like:
+#   - ${{ secrets.GITHUB_TOKEN }} (automatic)
+#   - ${{ secrets.MICROOS_TOKEN }} (custom secret you create)
+#
+# Setup Instructions:
+#   1. Go to your repo Settings → Secrets → Actions
+#   2. Add a secret named "MICROOS_TOKEN" with your GitHub PAT
+#   3. The workflow will use this for publishing releases
+# ============================================================================
+
+name: MicroOS Build & Release
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual triggers
+
+env:
+  MICROOS_VERSION: "0.1.0"
+  ALPINE_VERSION: "3.22"
+  GO_VERSION: "1.24"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # ============================================================================
+  # Job 1: Build Go API Binary
+  # ============================================================================
+  build-api:
+    name: Build API Binary
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            output: microos-server-amd64
+          - goos: linux
+            goarch: arm64
+            output: microos-server-arm64
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: api/go.sum
+      
+      - name: Download dependencies
+        working-directory: api
+        run: |
+          go mod download
+          go mod verify
+      
+      - name: Build static binary
+        working-directory: api
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          COMMIT_HASH=${{ github.sha }}
+          
+          go build \
+            -ldflags "-s -w -X main.Version=${{ env.MICROOS_VERSION }} -X main.BuildDate=${BUILD_TIME} -X main.Commit=${COMMIT_HASH}" \
+            -o ../build/output/${{ matrix.output }} \
+            ./cmd/server/
+      
+      - name: Verify binary
+        run: |
+          file build/output/${{ matrix.output }}
+          ls -lh build/output/${{ matrix.output }}
+      
+      - name: Run tests
+        working-directory: api
+        run: go test -v -short ./...
+      
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-binary-${{ matrix.goarch }}
+          path: build/output/${{ matrix.output }}
+          retention-days: 5
+
+  # ============================================================================
+  # Job 2: Build Alpine Linux ISO
+  # ============================================================================
+  build-iso:
+    name: Build MicroOS ISO
+    runs-on: ubuntu-latest
+    needs: build-api
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Download API binary (amd64)
+        uses: actions/download-artifact@v4
+        with:
+          name: api-binary-amd64
+          path: build/output/
+      
+      - name: Setup Alpine Linux build environment
+        uses: jirutka/setup-alpine@v1
+        with:
+          arch: x86_64
+          packages: >
+            apk-tools
+            xorriso
+            squashfs-tools
+            syslinux
+            grub
+            grub-bios
+            grub-efi
+            mtools
+            dosfstools
+            curl
+            cpio
+            gzip
+            linux-virt
+            openrc
+            eudev
+            dbus
+            mesa
+            mesa-va-gallium
+            mesa-vulkan
+            libva
+            intel-media-driver
+            ffmpeg
+            ffmpeg-libs
+            openssl
+            iptables
+            ca-certificates
+      
+      - name: Build MicroOS ISO
+        shell: alpine.sh {0}
+        run: |
+          # Set API binary path for ISO injection
+          API_BINARY="./build/output/microos-server-amd64"
+          
+          # Make build script executable
+          chmod +x scripts/build-iso.sh
+          
+          # Run the ISO build
+          export API_BINARY="${API_BINARY}"
+          export MICROOS_VERSION="${{ env.MICROOS_VERSION }}"
+          export ALPINE_VERSION="${{ env.ALPINE_VERSION }}"
+          bash scripts/build-iso.sh
+      
+      - name: Verify ISO
+        run: |
+          ISO_FILE="microos-${{ env.MICROOS_VERSION }}-x86_64.iso"
+          if [ -f "/tmp/microos-output/${ISO_FILE}" ]; then
+            ISO_SIZE=$(stat -c%s "/tmp/microos-output/${ISO_FILE}")
+            ISO_SIZE_MB=$((ISO_SIZE / 1024 / 1024))
+            echo "ISO size: ${ISO_SIZE_MB}MB"
+            
+            if [ "${ISO_SIZE_MB}" -le 200 ]; then
+              echo "✅ ISO is under 200MB target!"
+            else
+              echo "⚠️ ISO exceeds 200MB target - needs optimization"
+            fi
+          else
+            echo "❌ ISO not found!"
+            exit 1
+          fi
+      
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: microos-iso-amd64
+          path: /tmp/microos-output/microos-${{ env.MICROOS_VERSION }}-x86_64.iso
+          retention-days: 30
+      
+      - name: Upload ISO SHA256 checksum
+        run: |
+          sha256sum /tmp/microos-output/microos-${{ env.MICROOS_VERSION }}-x86_64.iso > \
+            /tmp/microos-output/microos-${{ env.MICROOS_VERSION }}-x86_64.iso.sha256
+      
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: microos-checksum-amd64
+          path: /tmp/microos-output/microos-${{ env.MICROOS_VERSION }}-x86_64.iso.sha256
+          retention-days: 30
+
+  # ============================================================================
+  # Job 3: Build ARM64 ISO (for ARM data centers)
+  # ============================================================================
+  build-iso-arm64:
+    name: Build MicroOS ISO (ARM64)
+    runs-on: ubuntu-latest
+    needs: build-api
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Download API binary (arm64)
+        uses: actions/download-artifact@v4
+        with:
+          name: api-binary-arm64
+          path: build/output/
+      
+      - name: Setup Alpine Linux build environment (ARM64)
+        uses: jirutka/setup-alpine@v1
+        with:
+          arch: aarch64
+          packages: >
+            apk-tools
+            xorriso
+            squashfs-tools
+            grub
+            grub-efi
+            curl
+            cpio
+            gzip
+      
+      - name: Build MicroOS ISO (ARM64)
+        shell: alpine.sh {0}
+        run: |
+          export API_BINARY="./build/output/microos-server-arm64"
+          export MICROOS_VERSION="${{ env.MICROOS_VERSION }}"
+          export ALPINE_VERSION="${{ env.ALPINE_VERSION }}"
+          export ARCH="aarch64"
+          chmod +x scripts/build-iso.sh
+          bash scripts/build-iso.sh
+      
+      - name: Upload ARM64 ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: microos-iso-arm64
+          path: /tmp/microos-output/microos-${{ env.MICROOS_VERSION }}-aarch64.iso
+          retention-days: 30
+
+  # ============================================================================
+  # Job 4: Publish Release
+  # ============================================================================
+  publish-release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: [build-api, build-iso, build-iso-arm64]
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+      
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: "MicroOS ${{ github.ref_name }}"
+          body: |
+            ## MicroOS Video Streaming Server ${{ github.ref_name }}
+            
+            ### 🎯 What's New
+            - Ultra-light headless OS for video hosting & streaming
+            - ISO size under 200MB, RAM consumption under 200MB
+            - GPU-accelerated transcoding (VA-API, NVENC, Vulkan AV1)
+            - HLS/DASH adaptive streaming support
+            - Single Go binary API for complete management
+            
+            ### 📦 Downloads
+            
+            | Architecture | ISO | API Binary |
+            |-------------|-----|-----------|
+            | x86_64 | `microos-${{ env.MICROOS_VERSION }}-x86_64.iso` | `microos-server-amd64` |
+            | ARM64 | `microos-${{ env.MICROOS_VERSION }}-aarch64.iso` | `microos-server-arm64` |
+            
+            ### 🚀 Quick Start
+            ```bash
+            # Download and flash ISO to USB
+            dd if=microos-*.iso of=/dev/sdX bs=4M
+            
+            # Boot the USB on your server
+            # MicroOS starts automatically with API on port 8080
+            
+            # Upload a video
+            curl -X POST http://your-server:8080/api/v1/upload \
+              -F "video=@your-video.mp4"
+            
+            # Get streaming URL
+            curl http://your-server:8080/api/v1/videos/{id}/stream
+            ```
+            
+            ### ⚙️ System Requirements
+            - Minimum RAM: 256MB (200MB OS + 56MB for processing)
+            - Recommended: 1GB+ for concurrent transcoding
+            - GPU: Optional (Intel/AMD VA-API, NVIDIA NVENC, Vulkan)
+            - Storage: 10GB+ for video library
+            
+            ---
+            Built with ❤️ for video hosting companies, data centers, and streaming platforms.
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
+          files: |
+            release-artifacts/microos-iso-amd64/*
+            release-artifacts/microos-iso-arm64/*
+            release-artifacts/api-binary-amd64/*
+            release-artifacts/api-binary-arm64/*
+
+  # ============================================================================
+  # Job 5: Security Scan
+  # ============================================================================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build-api
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Run Go security scan
+        uses: securego/gosec@master
+        with:
+          args: './api/...'
+      
+      - name: Run dependency vulnerability check
+        working-directory: api
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

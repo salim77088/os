@@ -1,0 +1,124 @@
+# MicroOS Stripped Kernel Configuration for x86_64
+# Based on Alpine Linux virt kernel with additional stripping
+# Only essential modules for: networking, disk, GPU, video processing
+#
+# This config removes:
+#   - Sound drivers (no audio playback needed - server only)
+#   - Wireless drivers (data centers use Ethernet)
+#   - USB gadget drivers
+#   - Bluetooth
+#   - Unused filesystems
+#   - ISDN, telephony, ham radio
+#   - Unused crypto algorithms
+#
+# Keeping:
+#   - Ethernet networking (igb, ixgbe, mlx, bnxt_en)
+#   - Disk management (ext4, xfs, btrfs, virtio)
+#   - GPU drivers (Intel i915, AMD amdgpu, NVIDIA nouveau)
+#   - VA-API / Vulkan hardware video acceleration
+#   - VirtIO for cloud/VM deployment
+#   - Basic USB for keyboard (debug only)
+
+# === Essential Networking ===
+CONFIG_NET=y
+CONFIG_INET=y
+CONFIG_NETDEVICES=y
+CONFIG_ETHERNET=y
+
+# Intel networking (common in data centers)
+CONFIG_IGB=m
+CONFIG_IGBVF=m
+CONFIG_IXGBE=m
+CONFIG_IXGBEVF=m
+CONFIG_I40E=m
+CONFIG_I40EVF=m
+CONFIG_ICE=m
+
+# Mellanox (common in data centers)
+CONFIG_MLX4_EN=m
+CONFIG_MLX5_CORE=m
+CONFIG_MLX5_CORE_EN=y
+
+# Broadcom NetXtreme (common in servers)
+CONFIG_BNXT=m
+CONFIG_BNXT_SRIOV=y
+
+# Realtek (common in budget servers)
+CONFIG_R8169=m
+
+# VirtIO networking (for VMs)
+CONFIG_VIRTIO_NET=m
+
+# === Essential Disk/Filesystem ===
+CONFIG_BLOCK=y
+CONFIG_EXT4_FS=y
+CONFIG_XFS_FS=m
+CONFIG_BTRFS_FS=m
+CONFIG_FAT_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_NTFS_FS=m
+
+# VirtIO disk (for VMs)
+CONFIG_VIRTIO_BLK=m
+CONFIG_VIRTIO_PCI=m
+
+# SCSI (for server hardware)
+CONFIG_SCSI=y
+CONFIG_BLK_DEV_SD=y
+CONFIG_ATA=y
+CONFIG_ATA_PIIX=y
+CONFIG_SATA_AHCI=y
+
+# === Essential GPU Drivers ===
+CONFIG_DRM=y
+CONFIG_DRM_KMS_HELPER=y
+
+# Intel GPU (i915 - VA-API)
+CONFIG_DRM_I915=m
+
+# AMD GPU (amdgpu - VA-API + Vulkan)
+CONFIG_DRM_AMDGPU=m
+CONFIG_DRM_AMDGPU_SI=y
+CONFIG_DRM_AMDGPU_CIK=y
+
+# NVIDIA (nouveau - basic, NVENC via separate driver)
+CONFIG_DRM_NOUVEAU=m
+
+# Vulkan support
+CONFIG_VULKAN=y
+
+# VA-API support
+CONFIG_MEDIA_SUPPORT=y
+CONFIG_MEDIA_CONTROLLER=y
+CONFIG_V4L_PLATFORM_DRIVERS=y
+
+# === Essential System ===
+CONFIG_64BIT=y
+CONFIG_SMP=y
+CONFIG_HYPERVISOR_GUEST=y
+CONFIG_KVM_GUEST=y
+CONFIG_PARAVIRT=y
+CONFIG_PARAVIRT_CLOCK=y
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_MENU=y
+
+# Memory management (for low RAM operation)
+CONFIG_MEMORY_HOTPLUG=y
+CONFIG_TRANSPARENT_HUGEPAGE=y
+CONFIG_COMPACTION=y
+
+# === Removed (NOT needed for streaming server) ===
+# CONFIG_SOUND=n          # No sound playback
+# CONFIG_SND=n            # No ALSA
+# CONFIG_BT=n             # No Bluetooth
+# CONFIG_WIRELESS=n       # No WiFi
+# CONFIG_HAMRADIO=n       # No ham radio
+# CONFIG_ISDN=n           # No ISDN
+# CONFIG_PHONE=n          # No telephony
+# CONFIG_USB_GADGET=n     # No USB gadget mode
+# CONFIG_FB=n             # No framebuffer (headless)
+# CONFIG_INPUT_JOYSTICK=n # No joysticks
+# CONFIG_INPUT_TOUCHSCREEN=n # No touchscreens
+# CONFIG_USB_AUDIO=n      # No USB audio
+# CONFIG_USB_PRINTER=n    # No USB printer
+# CONFIG_USB_SERIAL=n     # No USB serial (mostly)

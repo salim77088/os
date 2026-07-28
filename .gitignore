@@ -1,0 +1,35 @@
+# MicroOS .gitignore
+
+# Build artifacts
+build/output/
+build/rootfs-actual/
+*.iso
+
+# Go build cache
+api/__debug_bin*
+api/debug
+*.test
+*.prof
+
+# Development files
+.env
+.env.local
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+tmp/
+*.tmp
+*.bak
+
+# Downloaded search files
+search_*.json

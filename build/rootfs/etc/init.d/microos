@@ -1,0 +1,83 @@
+#!/sbin/openrc-run
+# MicroOS Video Streaming Server Init Script
+# This script starts the API server and ensures all required services are running
+
+name="microos"
+description="MicroOS Video Streaming and Transcoding Server"
+
+command="/opt/microos/bin/microos-server"
+command_args="--config /etc/microos/config.toml"
+command_background=true
+pidfile="/var/run/microos.pid"
+
+start_stop_daemon_args="--make-pidfile --foreground"
+
+depend() {
+    need net dbus
+    after firewall
+    use logger
+}
+
+start_pre() {
+    # Ensure data directories exist
+    mkdir -p /var/lib/microos/videos
+    mkdir -p /var/lib/microos/hls
+    mkdir -p /var/lib/microos/dash
+    mkdir -p /var/lib/microos/tmp
+    mkdir -p /var/log/microos
+    
+    # Set environment variables for GPU detection
+    export MICROOS_GPU_TYPE="auto"
+    export MICROOS_CODEC="av1"
+    
+    # Check FFmpeg availability
+    if ! command -v ffmpeg &>/dev/null; then
+        eerror "FFmpeg not found! Video transcoding will not work."
+        return 1
+    fi
+    
+    # Check GPU acceleration
+    if [ -d /dev/dri ]; then
+        einfo "GPU acceleration detected (VA-API / Vulkan)"
+        ls /dev/dri/ | einfo
+    elif [ -e /dev/nvidia0 ]; then
+        einfo "GPU acceleration detected (NVENC)"
+    else
+        ewarn "No GPU acceleration detected. Using software encoding."
+    fi
+    
+    # Report system resources
+    MEM_TOTAL=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    MEM_MB=$((MEM_TOTAL / 1024))
+    einfo "System memory: ${MEM_MB}MB"
+    
+    # Verify minimum RAM
+    if [ "${MEM_MB}" -lt 256 ]; then
+        ewarn "System has less than 256MB RAM. Performance may be limited."
+    fi
+}
+
+start_post() {
+    # Wait for API to become available
+    local timeout=30
+    local count=0
+    
+    while [ $count -lt $timeout ]; do
+        if curl -sf http://localhost:8080/api/v1/health >/dev/null 2>&1; then
+            einfo "MicroOS API is ready on port 8080"
+            return 0
+        fi
+        sleep 1
+        count=$((count + 1))
+    done
+    
+    ewarn "MicroOS API did not become ready within ${timeout}s"
+}
+
+stop_post() {
+    # Clean up temporary transcoding files
+    rm -rf /var/lib/microos/tmp/* 2>/dev/null || true
+    
+    # Clean up stale PID file
+    rm -f /var/run/microos.pid 2>/dev/null || true
+}

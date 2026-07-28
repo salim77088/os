@@ -1,0 +1,83 @@
+# MicroOS Configuration File
+# Ultra-light video streaming and transcoding server for Alpine Linux
+# This file is embedded in the ISO and provides default settings
+# Environment variables can override these settings at runtime
+
+[server]
+host = "0.0.0.0"        # Listen on all interfaces
+port = 8080              # API port
+read_timeout = 30        # Seconds
+write_timeout = 120      # Seconds (long for uploads)
+max_upload_size = 5368709120  # 5 GB max upload
+enable_cors = true       # Enable CORS for web player integration
+
+[database]
+path = "/var/lib/microos/microos.db"
+max_open_conns = 3       # Minimal for low RAM
+max_idle_conns = 1       # Keep connections tight
+conn_max_lifetime = 300  # Seconds
+
+[storage]
+base_path = "/var/lib/microos"
+videos_dir = "videos"    # Original video storage
+hls_dir = "hls"          # HLS segments
+dash_dir = "dash"        # DASH segments
+temp_dir = "tmp"         # Temporary transcoding files
+max_storage_gb = 0       # Unlimited storage
+
+[transcode]
+workers = 2              # Number of transcoding workers
+enable_gpu = true        # Enable GPU acceleration when available
+gpu_type = "auto"        # Auto-detect: "vaapi", "nvenc", "vulkan", "software"
+preferred_codec = "av1"  # Preferred codec: "av1", "h264", "hevc", "vp9"
+h264_crf = 23            # H.264 quality (lower = better)
+av1_crf = 30             # AV1 quality (SVT-AV1 preset mapped)
+hevc_crf = 28            # HEVC quality
+hls_segment_duration = 6 # HLS segment length in seconds
+hls_playlist_size = 0    # Unlimited playlist (0 = no limit)
+dash_segment_duration = 6 # DASH segment length in seconds
+enable_hls = true        # Generate HLS packages
+enable_dash = true       # Generate DASH packages
+zero_copy = true         # Use zero-copy GPU memory for transcoding
+audio_bitrate = "128k"   # AAC audio bitrate
+
+# Resolution ladder for adaptive streaming
+# Videos are transcoded at each resolution that is <= source resolution
+[[transcode.resolution_ladder]]
+name = "1080p"
+width = 1920
+height = 1080
+bitrate = "5M"
+max_bitrate = "8M"
+
+[[transcode.resolution_ladder]]
+name = "720p"
+width = 1280
+height = 720
+bitrate = "2.5M"
+max_bitrate = "4M"
+
+[[transcode.resolution_ladder]]
+name = "480p"
+width = 854
+height = 480
+bitrate = "1M"
+max_bitrate = "1.5M"
+
+[[transcode.resolution_ladder]]
+name = "360p"
+width = 640
+height = 360
+bitrate = "500k"
+max_bitrate = "750k"
+
+[auth]
+enabled = false          # Enable API key authentication
+admin_key = ""           # Admin API key (set via environment variable)
+
+# Logging configuration
+[logging]
+level = "info"           # Log level: "debug", "info", "warn", "error"
+output = "/var/log/microos/microos.log"  # Log file path
+max_size_mb = 10         # Max log file size before rotation
+max_backups = 3          # Number of rotated log files to keep
