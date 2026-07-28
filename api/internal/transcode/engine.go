@@ -10,7 +10,6 @@ import (
         "strconv"
         "strings"
         "sync"
-        "time"
 
         "github.com/salim77088/os/api/internal/config"
         "github.com/salim77088/os/api/internal/database"
@@ -206,7 +205,7 @@ func (e *Engine) processVideo(ctx context.Context, task TranscodeTask) error {
                         log.Printf("Warning: failed to transcode %s for video %s: %v", res.Name, videoID, err)
                         continue
                 }
-                transcodedFiles = append(transcodedFiles, output)
+                transcodedFiles = append(transcodedFiles, *output)
         }
 
         if len(transcodedFiles) == 0 {
