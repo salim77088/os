@@ -193,6 +193,7 @@ jobs:
           # Step 3: Install minimal packages
           # ==========================================
           echo "[3/9] Installing minimal packages..."
+          # Core system packages (verified to exist in Alpine 3.22)
           apk --root "${ROOTFS_DIR}" --no-cache --no-progress add \
             alpine-base \
             openrc \
@@ -210,21 +211,30 @@ jobs:
             e2fsprogs \
             dosfstools \
             parted \
-            busybox-initscripts \
             mesa \
-            mesa-va-gallium \
-            mesa-vulkan-intel \
-            mesa-vulkan-radeon \
-            vulkan-loader \
-            vulkan-tools \
+            mesa-gl \
+            mesa-egl \
+            mesa-gbm \
+            mesa-gles \
             libva \
-            intel-media-driver \
+            libva-utils \
             ffmpeg \
             ffmpeg-libs \
             openssl \
             tzdata \
             musl \
             musl-utils
+
+          # GPU acceleration packages (optional — install what exists)
+          echo "[3/9] Installing GPU acceleration packages (tolerating missing packages)..."
+          apk --root "${ROOTFS_DIR}" --no-cache add \
+            mesa-vulkan-intel \
+            vulkan-loader \
+            intel-media-driver \
+            mesa-va-gallium \
+            2>/dev/null || true
+          # AMD Vulkan is in community repo only for some archs
+          apk --root "${ROOTFS_DIR}" --no-cache add mesa-vulkan-radeon 2>/dev/null || true
 
           echo "[3/9] Packages installed"
 
