@@ -155,8 +155,7 @@ jobs:
             coreutils \
             findutils \
             binutils \
-            file \
-            grub-efi-x86_64
+            file
 
           # Configuration
           ARCH="x86_64"
@@ -457,14 +456,34 @@ jobs:
           # Create EFI boot image for UEFI support
           EFI_DIR="${BUILD_DIR}/efi"
           mkdir -p "${EFI_DIR}/EFI/BOOT"
-          cp "/usr/share/grub/x86_64-efi/grub.efi" "${EFI_DIR}/EFI/BOOT/bootx64.efi" 2>/dev/null || \
-          cp "/usr/lib/grub/x86_64-efi/grub.efi" "${EFI_DIR}/EFI/BOOT/bootx64.efi" 2>/dev/null || true
 
-          # Create EFI FAT image
-          dd if=/dev/zero of="${ISO_DIR}/boot/grub/efi.img" bs=1M count=4 2>/dev/null
-          mkfs.vfat "${ISO_DIR}/boot/grub/efi.img" 2>/dev/null || mformat -i "${ISO_DIR}/boot/grub/efi.img" :: 2>/dev/null || true
-          mcopy -i "${ISO_DIR}/boot/grub/efi.img" "${EFI_DIR}/EFI" ::EFI 2>/dev/null || \
-          true
+          # Find GRUB EFI binary - it can be in various locations
+          GRUB_EFI=""
+          for path in \
+            "/usr/lib/grub/x86_64-efi/grub.efi" \
+            "/usr/share/grub/x86_64-efi/grub.efi" \
+            "/usr/lib/grub/x86_64-efi-signed/grubx64.efi" \
+            "/usr/share/grub-efi/x86_64/grubx64.efi"; do
+            if [ -f "${path}" ]; then
+              GRUB_EFI="${path}"
+              break
+            fi
+          done
+
+          if [ -n "${GRUB_EFI}" ]; then
+            echo "Found GRUB EFI: ${GRUB_EFI}"
+            cp "${GRUB_EFI}" "${EFI_DIR}/EFI/BOOT/bootx64.efi"
+
+            # Create EFI FAT image
+            dd if=/dev/zero of="${ISO_DIR}/boot/grub/efi.img" bs=1M count=4 2>/dev/null
+            mkfs.vfat "${ISO_DIR}/boot/grub/efi.img" 2>/dev/null || mformat -i "${ISO_DIR}/boot/grub/efi.img" :: 2>/dev/null || true
+            mcopy -i "${ISO_DIR}/boot/grub/efi.img" "${EFI_DIR}/EFI" ::EFI 2>/dev/null || true
+            echo "EFI boot image created"
+          else
+            echo "WARNING: GRUB EFI binary not found - ISO will be BIOS-only"
+            # Create a minimal dummy EFI image so xorriso doesn't fail
+            dd if=/dev/zero of="${ISO_DIR}/boot/grub/efi.img" bs=512 count=8 2>/dev/null || true
+          fi
 
           echo "[8/9] ISO directory prepared"
 
