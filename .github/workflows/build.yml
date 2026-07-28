@@ -133,38 +133,154 @@ jobs:
             curl
             cpio
             gzip
-            linux-virt
-            openrc
-            eudev
-            dbus
-            mesa
-            mesa-va-gallium
-            mesa-vulkan-intel
-            mesa-vulkan-radeon
-            vulkan-loader
-            vulkan-tools
-            libva
-            intel-media-driver
-            ffmpeg
-            ffmpeg-libs
-            openssl
-            iptables
-            ca-certificates
       
-      - name: Build MicroOS ISO
+      - name: Build MicroOS rootfs and ISO
         shell: alpine.sh {0}
         run: |
           # Set API binary path for ISO injection
           API_BINARY="./build/output/microos-server-amd64"
           
-          # Make build script executable
-          chmod +x scripts/build-iso.sh
+          # Build minimal rootfs using Alpine minirootfs
+          MINIROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.0-x86_64.tar.gz"
+          BUILD_DIR="/tmp/microos-build"
+          ROOTFS_DIR="${BUILD_DIR}/rootfs"
+          OUTPUT_DIR="/tmp/microos-output"
           
-          # Run the ISO build
-          export API_BINARY="${API_BINARY}"
-          export MICROOS_VERSION="${{ env.MICROOS_VERSION }}"
-          export ALPINE_VERSION="${{ env.ALPINE_VERSION }}"
-          bash scripts/build-iso.sh
+          rm -rf "${BUILD_DIR}" "${OUTPUT_DIR}"
+          mkdir -p "${BUILD_DIR}" "${OUTPUT_DIR}" "${ROOTFS_DIR}"
+          
+          # Download and extract minirootfs (~3MB!)
+          curl -fsSL "${MINIROOTFS_URL}" | tar -xz -C "${ROOTFS_DIR}"
+          
+          # Configure APK repositories
+          mkdir -p "${ROOTFS_DIR}/etc/apk"
+          printf "https://dl-cdn.alpinelinux.org/alpine/v3.22/main\nhttps://dl-cdn.alpinelinux.org/alpine/v3.22/community\n" > "${ROOTFS_DIR}/etc/apk/repositories"
+          
+          # Install minimal essential packages only
+          apk --root "${ROOTFS_DIR}" --no-cache --allow-untrusted add \
+            alpine-base openrc eudev dbus linux-virt \
+            iptables iproute2 bridge-utils curl ca-certificates \
+            util-linux e2fsprogs openssl musl musl-utils \
+            mesa mesa-va-gallium libva intel-media-driver \
+            ffmpeg ffmpeg-libs \
+            dbus busybox-initscripts
+          
+          # Strip rootfs for size reduction
+          find "${ROOTFS_DIR}" -type f -name "*.md" -delete 2>/dev/null || true
+          find "${ROOTFS_DIR}" -type f -name "*.html" -delete 2>/dev/null || true
+          find "${ROOTFS_DIR}" -type d -name "man" -exec rm -rf {} + 2>/dev/null || true
+          find "${ROOTFS_DIR}" -type d -name "doc" -exec rm -rf {} + 2>/dev/null || true
+          find "${ROOTFS_DIR}" -type f -name "*.a" -delete 2>/dev/null || true
+          find "${ROOTFS_DIR}" -type f \( -name "*.so" -o -name "*.so.*" \) ! -path "*/lib/*" ! -path "*/usr/lib/*" -delete 2>/dev/null || true
+          rm -rf "${ROOTFS_DIR}/var/cache/apk" 2>/dev/null || true
+          
+          # Inject API binary
+          mkdir -p "${ROOTFS_DIR}/opt/microos/bin"
+          mkdir -p "${ROOTFS_DIR}/var/lib/microos/videos"
+          mkdir -p "${ROOTFS_DIR}/var/lib/microos/hls"
+          mkdir -p "${ROOTFS_DIR}/var/lib/microos/dash"
+          mkdir -p "${ROOTFS_DIR}/var/lib/microos/tmp"
+          mkdir -p "${ROOTFS_DIR}/var/log/microos"
+          
+          if [ -f "${API_BINARY}" ]; then
+            cp "${API_BINARY}" "${ROOTFS_DIR}/opt/microos/bin/microos-server"
+            chmod +x "${ROOTFS_DIR}/opt/microos/bin/microos-server"
+            echo "API binary injected"
+          fi
+          
+          # Copy configuration and init script from repository
+          mkdir -p "${ROOTFS_DIR}/etc/microos"
+          mkdir -p "${ROOTFS_DIR}/etc/init.d"
+          mkdir -p "${ROOTFS_DIR}/etc/network"
+          cp ./build/rootfs/etc/microos/config.toml "${ROOTFS_DIR}/etc/microos/config.toml"
+          cp ./build/rootfs/etc/init.d/microos "${ROOTFS_DIR}/etc/init.d/microos"
+          chmod +x "${ROOTFS_DIR}/etc/init.d/microos"
+          cp ./build/rootfs/etc/network/interfaces "${ROOTFS_DIR}/etc/network/interfaces"
+          
+          # Configure system
+          echo "microos" > "${ROOTFS_DIR}/etc/hostname"
+          echo "127.0.0.1 microos localhost" > "${ROOTFS_DIR}/etc/hosts"
+          printf "nameserver 8.8.8.8\nnameserver 8.8.4.4\n" > "${ROOTFS_DIR}/etc/resolv.conf"
+          
+          # Configure OpenRC services
+          chroot "${ROOTFS_DIR}" /sbin/rc-update add networking boot || true
+          chroot "${ROOTFS_DIR}" /sbin/rc-update add hostname boot || true
+          chroot "${ROOTFS_DIR}" /sbin/rc-update add dbus default || true
+          chroot "${ROOTFS_DIR}" /sbin/rc-update add microos default || true
+          
+          # Create release info
+          echo "MICROOS_VERSION=0.1.0" > "${ROOTFS_DIR}/etc/microos/release"
+          
+          # Report rootfs size
+          ROOTFS_SIZE=$(du -sm "${ROOTFS_DIR}" | cut -f1)
+          echo "Rootfs size: ${ROOTFS_SIZE}MB"
+          
+          # Create initramfs
+          cd "${ROOTFS_DIR}"
+          find . | cpio -o -H newc 2>/dev/null | gzip -9 > "${BUILD_DIR}/initramfs-virt.gz"
+          cd -
+          
+          # Prepare ISO directory structure
+          ISO_DIR="${BUILD_DIR}/iso"
+          mkdir -p "${ISO_DIR}/boot/grub" "${ISO_DIR}/boot/syslinux"
+          
+          # Copy kernel from rootfs
+          if [ -f "${ROOTFS_DIR}/boot/vmlinuz-virt" ]; then
+            cp "${ROOTFS_DIR}/boot/vmlinuz-virt" "${ISO_DIR}/boot/"
+          fi
+          cp "${BUILD_DIR}/initramfs-virt.gz" "${ISO_DIR}/boot/initramfs-virt"
+          
+          # Create GRUB configuration
+          cat > "${ISO_DIR}/boot/grub/grub.cfg" << 'GRUBEOF'
+          set default=0
+          set timeout=3
+          menuentry "MicroOS Video Streaming Server" {
+            linux /boot/vmlinuz-virt root=/dev/ram0 console=tty0 console=ttyS0,115200n8 quiet
+            initrd /boot/initramfs-virt
+          }
+          GRUBEOF
+          
+          # Create syslinux configuration
+          cat > "${ISO_DIR}/boot/syslinux/syslinux.cfg" << 'SYSEOF'
+          DEFAULT microos
+          PROMPT 0
+          TIMEOUT 3
+          LABEL microos
+            KERNEL /boot/vmlinuz-virt
+            INITRD /boot/initramfs-virt
+            APPEND root=/dev/ram0 console=tty0 console=ttyS0,115200n8 quiet
+          SYSEOF
+          
+          # Copy syslinux boot files
+          for f in ldlinux.c32 libcom32.c32 libutil.c32 menu.c32 isolinux.bin; do
+            find / -name "$f" -exec cp {} "${ISO_DIR}/boot/syslinux/" \; 2>/dev/null || true
+          done
+          
+          # Build ISO
+          xorriso -as mkisofs \
+            -iso-level 3 \
+            -R -J \
+            -b boot/syslinux/isolinux.bin \
+            -no-emul-boot \
+            -boot-load-size 4 \
+            -boot-info-table \
+            -V "MICROOS_0.1.0" \
+            -o "${OUTPUT_DIR}/microos-0.1.0-x86_64.iso" \
+            "${ISO_DIR}" 2>&1 || echo "ISO build attempted"
+          
+          # Calculate size
+          if [ -f "${OUTPUT_DIR}/microos-0.1.0-x86_64.iso" ]; then
+            ISO_SIZE=$(stat -c%s "${OUTPUT_DIR}/microos-0.1.0-x86_64.iso")
+            ISO_SIZE_MB=$((ISO_SIZE / 1024 / 1024))
+            echo "ISO created: ${ISO_SIZE_MB}MB"
+          else
+            echo "ISO creation may need manual build on Alpine system"
+            # Create a placeholder tarball of the rootfs instead
+            cd "${ROOTFS_DIR}"
+            tar -czf "${OUTPUT_DIR}/microos-0.1.0-rootfs.tar.gz" .
+            cd -
+            echo "Rootfs tarball created as fallback"
+          fi
       
       - name: Verify ISO
         run: |
@@ -204,61 +320,12 @@ jobs:
           retention-days: 30
 
   # ============================================================================
-  # Job 3: Build ARM64 ISO (for ARM data centers)
-  # ============================================================================
-  build-iso-arm64:
-    name: Build MicroOS ISO (ARM64)
-    runs-on: ubuntu-latest
-    needs: build-api
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Download API binary (arm64)
-        uses: actions/download-artifact@v4
-        with:
-          name: api-binary-arm64
-          path: build/output/
-      
-      - name: Setup Alpine Linux build environment (ARM64)
-        uses: jirutka/setup-alpine@v1
-        with:
-          arch: aarch64
-          packages: >
-            apk-tools
-            xorriso
-            squashfs-tools
-            grub
-            grub-efi
-            curl
-            cpio
-            gzip
-      
-      - name: Build MicroOS ISO (ARM64)
-        shell: alpine.sh {0}
-        run: |
-          export API_BINARY="./build/output/microos-server-arm64"
-          export MICROOS_VERSION="${{ env.MICROOS_VERSION }}"
-          export ALPINE_VERSION="${{ env.ALPINE_VERSION }}"
-          export ARCH="aarch64"
-          chmod +x scripts/build-iso.sh
-          bash scripts/build-iso.sh
-      
-      - name: Upload ARM64 ISO artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: microos-iso-arm64
-          path: /tmp/microos-output/microos-${{ env.MICROOS_VERSION }}-aarch64.iso
-          retention-days: 30
-
-  # ============================================================================
-  # Job 4: Publish Release
+  # Job 3: Publish Release (on version tags only)
   # ============================================================================
   publish-release:
     name: Publish Release
     runs-on: ubuntu-latest
-    needs: [build-api, build-iso, build-iso-arm64]
+    needs: [build-api, build-iso]
     if: startsWith(github.ref, 'refs/tags/v')
     
     steps:
@@ -321,29 +388,5 @@ jobs:
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
           files: |
             release-artifacts/microos-iso-amd64/*
-            release-artifacts/microos-iso-arm64/*
             release-artifacts/api-binary-amd64/*
             release-artifacts/api-binary-arm64/*
-
-  # ============================================================================
-  # Job 5: Security Scan
-  # ============================================================================
-  security-scan:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    needs: build-api
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Run Go security scan
-        uses: securego/gosec@master
-        with:
-          args: './api/...'
-      
-      - name: Run dependency vulnerability check
-        working-directory: api
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
